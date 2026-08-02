@@ -1,0 +1,3 @@
+conda activate spectrum_project
+cd C:\Users\ouyan\Desktop\dachuang
+streamlit run app.py

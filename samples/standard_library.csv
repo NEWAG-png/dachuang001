@@ -1,0 +1,4 @@
+Material_Name,Peak_Pos_1,Peak_Int_1,Peak_Pos_2,Peak_Int_2
+Material_A,450,1,550,0.5
+Material_B,600,0.9,700,0.8
+Material_C,350,0.8,480,0.6
