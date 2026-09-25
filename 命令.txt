@@ -1,3 +1,21 @@
 conda activate spectrum_project
 cd C:\Users\ouyan\Desktop\dachuang
 streamlit run app.py
+
+【角色与目标】
+你是一个精通 Python 数据科学的专家，擅长开发基于 Streamlit 的光谱智能检索系统。目前系统已完美支持 FTIR 和 XRF 两种数据，请为我编写一套高扩展性的后端逻辑，以便后续无缝扩展至5种以上不同类型的光谱数据。
+【核心技术栈与架构约束】
+
+    CSV 解析器（parse_csv）：严禁使用硬编码。必须使用 re (正则表达式) 对表头进行模糊匹配，完美兼容如 Energy [keV]、Wavenumber [cm-1] 等含空格和括号的奇葩表头。
+    数据库检索（load_database_spectra）：读取数据库时，必须通过 WHERE spectrum_type = ? 严格隔离不同数据类型，防止将 XRF 与 FTIR 混比。
+    相似度算法（calculate_similarity）：这是系统核心。严禁使用 set().intersection 寻找公共点，因为 FTIR 的浮点数在存入/读取数据库时存在精度丢失。
+        必须使用 pd.merge_asof 进行“动态模糊对齐”。
+        设置 direction='nearest' 和 tolerance (容差，如 0.1)，彻底解决浮点数微小误差导致的匹配度低下问题。
+    表格展示（Streamlit UI）：严禁使用 df.style.highlight_max()，该属性会导致 Streamlit 渲染出现“多行幽灵绿”的 CSS Bug。必须使用 df.style.apply(highlight_func, axis=1) 自定义函数，仅强制为 DataFrame 索引为 0 的行添加浅绿色背景。
+
+【下一步扩展任务】
+我即将导入 [在此处填入新数据类型，如：拉曼光谱 Raman] 数据。请基于上述架构约束，为我编写：
+
+    针对该新类型的正则匹配规则。
+    确保其存入数据库的 JSON 格式与现有结构完全一致。
+    演示如何将此新类型融入现有的相似度计算与前端展示逻辑中。

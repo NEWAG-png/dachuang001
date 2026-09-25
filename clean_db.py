@@ -1,27 +1,25 @@
 import sqlite3
 
-def clean_image_records():
-    conn = sqlite3.connect('spectrum_data.db')
-    cursor = conn.cursor()
-    
-    try:
-        # 1. 先看看数据库里有多少条图片数据
-        cursor.execute("SELECT COUNT(*) FROM spectra WHERE source_tag = 'User_Upload'")
-        count = cursor.fetchone()[0]
-        print(f"🔍 发现 {count} 条图片测试数据。")
-        
-        if count > 0:
-            # 2. 执行删除：只删 source_tag 是 'User_Upload' 的
-            cursor.execute("DELETE FROM spectra WHERE source_tag = 'User_Upload'")
-            conn.commit()
-            print(f"✅ 成功删除 {count} 条图片数据！你的 CSV 标准数据已安全保留。")
-        else:
-            print("ℹ️ 数据库里目前没有图片数据，无需清理。")
-            
-    except Exception as e:
-        print(f"❌ 出错了: {e}")
-    finally:
-        conn.close()
+# 1. 连接数据库
+conn = sqlite3.connect('spectrum_data.db')
+cursor = conn.cursor()
 
-if __name__ == "__main__":
-    clean_image_records()
+# 2. 查出所有名字叫 "待测样品" 的记录
+cursor.execute("SELECT id, material_name FROM spectra WHERE material_name LIKE ?", ('%待测样品%',))
+rows = cursor.fetchall()
+
+# 3. 删除它们
+for row in rows:
+    cursor.execute("DELETE FROM spectra WHERE id = ?", (row[0],))
+    print(f"已删除 ID: {row[0]}, 名称: {row[1]}")
+
+# 4. 提交并关闭
+conn.commit()
+conn.close()
+
+# 5. 验证一下现在数据库里还剩多少条标准数据
+conn2 = sqlite3.connect('spectrum_data.db')
+cursor2 = conn2.cursor()
+cursor2.execute("SELECT COUNT(*) FROM spectra WHERE source_tag = ?", ('Standard',))
+print(f"\n🚀 数据库清洗完毕！目前 XRF 标准库剩余真实数据: {cursor2.fetchone()[0]} 条。")
+conn2.close()
