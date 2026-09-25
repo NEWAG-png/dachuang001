@@ -34,17 +34,18 @@ def load_database_spectra(spectrum_type=None):
     try:
         if spectrum_type:
             # 核心修复：按类型过滤，FTIR 和 XRF 绝不混比
-            query = "SELECT spectrum_name, wavenumbers, intensities FROM spectra WHERE spectrum_type = ?"
+            query = "SELECT spectrum_name, source_tag, wavenumbers, intensities FROM spectra WHERE spectrum_type = ?"
             cursor.execute(query, (spectrum_type,))
         else:
-            query = "SELECT spectrum_name, wavenumbers, intensities FROM spectra"
+            query = "SELECT spectrum_name, source_tag, wavenumbers, intensities FROM spectra"
             cursor.execute(query)
             
         rows = cursor.fetchall()
         for row in rows:
-            name, wavenums_str, ints_str = row
+            name, source_tag, wavenums_str, ints_str = row
             spectra_data.append({
                 'name': name,
+                'source_tag': source_tag if source_tag else '',
                 'wavenumbers': json.loads(wavenums_str),
                 'intensities': json.loads(ints_str)
             })
@@ -54,57 +55,53 @@ def load_database_spectra(spectrum_type=None):
         conn.close()
     return spectra_data
 
-def parse_csv(file):
-    """终极正则表达式CSV解析器：专治带方括号、空格等奇葩表头"""
+def parse_csv(uploaded_file):
     try:
-        # 尝试常规读取
-        try:
-            df = pd.read_csv(file)
-        except UnicodeDecodeError:
-            # 遇到中文乱码时使用 gbk 编码读取
-            file.seek(0)
-            df = pd.read_csv(file, encoding='gbk')
-            
-        # 获取表头并转为小写，统一格式
-        headers = [c.lower().strip() for c in df.columns]
-        x_col, y_col = None, None
+        # 1. 尝试读取表头
+        df = pd.read_csv(uploaded_file, header=None, skip_blank_lines=True)
+        headers = df.iloc[0].astype(str).str.lower().tolist()
+        df = df.drop(index=0).reset_index(drop=True)
+        
+        x_col = None
+        y_col = None
         s_type = "Unknown"
         
-        # --- 1. 正则表达式精准锁定 X 轴 ---
+        # 2. 按表头关键词匹配 FTIR, Raman, XRF
         for i, h in enumerate(headers):
-                        # FTIR 锁定：匹配 wavenumber, cm-1, 波数等
-            if re.search(r'wavenumber|cm-1|cm\^-1|1/cm|波数', h):
-                # 如果 Y 轴表头里带有 "Raman" 字样，则自动识别为 Raman
-                y_header_lower = " ".join(headers).lower()
-                if 'raman' in y_header_lower:
-                    x_col, s_type = df.columns[i], "Raman"
+            # FTIR / Raman 锁定
+            if any(word in h for word in ['wavenumber', 'cm-1', 'cm^-1', '1/cm', '波数']):
+                if 'raman' in " ".join(headers):
+                    x_col, y_col, s_type = i, i+1, "Raman"
                 else:
-                    x_col, s_type = df.columns[i], "FTIR"
-            # XRF 锁定：匹配 energy, kev, channel 等
-            elif re.search(r'kev|energy|channel|ch|能量', h):
-                x_col, s_type = df.columns[i], "XRF"
+                    x_col, y_col, s_type = i, i+1, "FTIR"
+                break
+            # XRF 锁定
+            elif any(word in h for word in ['kev', 'energy', 'channel', 'ch', '能量']):
+                x_col, y_col, s_type = i, i+1, "XRF"
+                break
                 
-        # --- 2. 暴力锁定 Y 轴 ---
-        if x_col:
-            for i, h in enumerate(headers):
-                if re.search(r'transmittance|absorbance|intensity|count|cps|强度|透过率|吸光度', h):
-                    y_col = df.columns[i]
-                    break
+        # 3. 如果没有匹配到表头（无表头文件），按位置强制抓取前两列作为 XRD
+        if x_col is None and df.shape[1] >= 2:
+            try:
+                # 检查前两列是不是都是纯数字
+                pd.to_numeric(df[0])
+                pd.to_numeric(df[1])
+                x_col, y_col, s_type = 0, 1, "XRD"
+            except ValueError:
+                pass
         
-        # --- 3. 返回清洗后的数据 ---
-        if x_col and y_col:
-            data = pd.DataFrame({
-                "wavenumbers": df[x_col].astype(str).str.replace(",", ".").astype(float),
-                "intensities": df[y_col].astype(str).str.replace(",", ".").astype(float)
-            })
-            # 剔除无法转换的脏数据，按 X 轴升序排列
-            data = data.dropna().sort_values(by='wavenumbers').reset_index(drop=True)
-            return data, s_type
-        else:
-            return None, "Unknown"
+        if x_col is not None and y_col is not None:
+            x_data = df[x_col].dropna().astype(float).tolist()
+            y_data = df[y_col].dropna().astype(float).tolist()
+            
+            if len(x_data) > 0 and len(y_data) > 0:
+                return x_data, y_data, s_type
+            
+        return None, None, None
+        
     except Exception as e:
-        print(f"解析错误: {e}")
-        return None, "Unknown"
+        print(f"解析文件出错: {e}")
+        return None, None, None
 
 def process_image(uploaded_file):
     """使用 OpenCV 从光谱图片中提取曲线数据"""
@@ -196,12 +193,12 @@ with col1:
     with tab1:
         uploaded_file = st.file_uploader("请上传 CSV 文件", type=["csv"])
         if uploaded_file is not None:
-            df, s_type = parse_csv(uploaded_file)
-            if df is not None:
-                st.session_state.sample_df = df
+            x_sample, y_sample, s_type = parse_csv(uploaded_file)
+            if x_sample is not None:
+                st.session_state.sample_df = pd.DataFrame({"wavenumbers": x_sample, "intensities": y_sample})
                 st.session_state.sample_type = s_type
                 st.session_state.sample_name = uploaded_file.name
-                st.success(f"✅ 解析成功 ({len(df)} 个点)")
+                st.success(f"✅ 解析成功 ({len(x_sample)} 个点)")
                 st.info(f"🔍 系统自动识别：您上传的是 **{s_type}** 光谱数据")
             else:
                 st.error("❌ 无法识别 CSV 表头。请确保包含波数/能量和强度列。")
@@ -215,7 +212,7 @@ with col1:
                 if x_vals is not None:
                     # 提取的图片数据通常 X 轴是像素，这里仅作测试用
                     st.session_state.sample_df = pd.DataFrame({"wavenumbers": x_vals, "intensities": y_vals})
-                    st.session_state.sample_type = "FTIR" # 图片默认按FTIR处理
+                    st.session_state.sample_type = "FTIR"  # 图片默认按FTIR处理
                     st.session_state.sample_name = "Extracted from Image"
                     st.success("✅ 图片曲线提取成功！")
                 else:
@@ -234,7 +231,7 @@ with col2:
             matches = []
             for spec in db_spectra:
                 score = calculate_similarity(st.session_state.sample_df, spec)
-                matches.append({'name': spec['name'], 'score': score, 'data': spec})
+                matches.append({'name': spec['name'], 'score': score, 'source_tag': spec.get('source_tag', ''), 'data': spec})
             
             # 按相似度降序排列，取前 5
             matches.sort(key=lambda x: x['score'], reverse=True)
@@ -245,18 +242,40 @@ with col2:
             else:
                 st.success(f"🏆 找到匹配度最高的 {len(top_5)} 条数据：")
                 
-                # 1. 展示数据表格
-                                # 1. 展示数据表格（彻底修复多行变绿的 CSS 自定义样式）
+                # === XRD 专属：动态展示论文来源 ===
+                if s_type == "XRD":
+                    st.divider()
+                    st.subheader("📄 关联论文来源")
+                    for i, match in enumerate(top_5):
+                        rank_emoji = ["🥇", "🥈", "🥉", "🏅", "🏅"][i]
+                        paper_title = match.get('source_tag', '未找到来源')
+                        st.markdown(f"{rank_emoji} **Top {i+1}** - 匹配度: `{match['score']:.2f}%`  \n📖 **来源论文**: *{paper_title}*")
+                    st.divider()
+                
+                # 2. 展示数据表格（含 source_tag）
                 df_top5 = pd.DataFrame(top_5)
+                
+                # 根据类型设置显示中文表头
+                if s_type == "XRD":
+                    display_names = {"name": "标准谱图文件名", "source_tag": "来源论文"}
+                else:
+                    display_names = {"name": "标准谱图名称", "source_tag": "来源"}
+                
+                # 提取并显示指定列
+                df_display = df_top5[['name', 'score', 'source_tag']].rename(columns={
+                    'name': display_names['name'], 
+                    'score': '匹配度 (%)',
+                    'source_tag': display_names['source_tag']
+                })
                 
                 # 自定义高亮函数：只给第一行（最高分）加背景色
                 def highlight_top(row):
                     if row.name == 0:
-                        return ['background-color: #d4edda', 'background-color: #d4edda']
-                    return ['background-color: white', 'background-color: white']
+                        return ['background-color: #d4edda', 'background-color: #d4edda', 'background-color: #d4edda']
+                    return ['background-color: white', 'background-color: white', 'background-color: white']
 
                 st.dataframe(
-                    df_top5[['name', 'score']].style.apply(highlight_top, axis=1).format({'score': '{:.2f}%'}),
+                    df_display.style.apply(highlight_top, axis=1).format({'匹配度 (%)': '{:.2f}'}),
                     use_container_width=True, hide_index=True
                 )
 
