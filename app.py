@@ -5,9 +5,9 @@ import json
 import os
 import numpy as np
 import plotly.graph_objects as go
-import cv2
-import re
-from io import BytesIO
+
+# 导入图片识别工具模块
+from utils import extract_spectrum_master, pixels_to_real_data
 
 # --- 1. 基础配置与全局变量 ---
 st.set_page_config(page_title="智能光谱检索系统", layout="wide", initial_sidebar_state="expanded")
@@ -103,25 +103,32 @@ def parse_csv(uploaded_file):
         print(f"解析文件出错: {e}")
         return None, None, None
 
-def process_image(uploaded_file):
-    """使用 OpenCV 从光谱图片中提取曲线数据"""
-    img_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
-    if img is None: return None, None
+def process_image_from_file(temp_path):
+    """基于 utils.py 的专业图片曲线提取函数
+    替代原有的简易 process_image，使用 OpenCV 图像处理 + 坐标校准
     
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    参数：
+        temp_path: 临时图片文件路径
+        
+    返回：
+        (x_vals, y_vals, message)
+        x_vals: 提取的X轴数据数组
+        y_vals: 提取的Y轴数据数组
+        message: 状态信息
+    """
+    # 1. 使用 extract_spectrum_master 提取曲线像素坐标
+    pixel_x, pixel_y, msg1 = extract_spectrum_master(temp_path)
     
-    coords = np.column_stack(np.where(thresh > 0))
-    if len(coords) == 0: return None, None
+    if pixel_x is None:
+        return None, None, f"曲线提取失败: {msg1}"
     
-    # 提取曲线 Y 坐标并映射到 X 轴（简化版提取，实际应用需先校准坐标轴）
-    h, w, _ = img.shape
-    y_vals = coords[:, 0]
-    x_vals = coords[:, 1]
+    # 2. 将像素坐标转换为真实光谱数据
+    final_w, final_i, msg2 = pixels_to_real_data(pixel_x, pixel_y)
     
-    # 简单的模拟映射，实际使用需手动设置图像坐标范围
-    return x_vals, -y_vals + h 
+    if final_w is None:
+        return None, None, f"数据转换失败: {msg2}"
+    
+    return final_w, final_i, f"{msg1} -> {msg2}"
 
 def calculate_similarity(df1, db_spec_dict):
     """终极匹配算法：使用近似连接(merge_asof)彻底无视浮点数微小误差"""
@@ -132,7 +139,6 @@ def calculate_similarity(df1, db_spec_dict):
         
         df1_clean['wavenumbers'] = pd.to_numeric(df1_clean['wavenumbers'], errors='coerce')
         df2_clean['wavenumbers'] = pd.to_numeric(df2_clean['wavenumbers'], errors='coerce')
-        
         df1_clean['intensities'] = pd.to_numeric(df1_clean['intensities'], errors='coerce')
         df2_clean['intensities'] = pd.to_numeric(df2_clean['intensities'], errors='coerce')
         
@@ -141,7 +147,6 @@ def calculate_similarity(df1, db_spec_dict):
         df2_sorted = df2_clean.sort_values('wavenumbers')
 
         # 3. 核心黑科技：在 ±0.1 的极小误差范围内进行模糊对齐
-        # 只要两个波数相差不到 0.1，就直接视为同一个点！
         merged = pd.merge_asof(
             df1_sorted, 
             df2_sorted, 
@@ -200,23 +205,53 @@ with col1:
                 st.session_state.sample_name = uploaded_file.name
                 st.success(f"✅ 解析成功 ({len(x_sample)} 个点)")
                 st.info(f"🔍 系统自动识别：您上传的是 **{s_type}** 光谱数据")
+                # === 新增：XRD类型时显示Excel老化情况表下载链接 ===
+                if s_type == "XRD":
+                    excel_path = 'XRD老化情况.xlsx'
+                    if os.path.exists(excel_path):
+                        with open(excel_path, 'rb') as f:
+                            st.download_button(
+                                label='📊 查看XRD老化情况表',
+                                data=f,
+                                file_name='XRD老化情况.xlsx',
+                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                            )
+                    else:
+                        st.warning('⚠️ XRD老化情况.xlsx 文件未找到，请确保文件与app.py在同一目录下')
             else:
                 st.error("❌ 无法识别 CSV 表头。请确保包含波数/能量和强度列。")
 
     with tab2:
+        st.markdown("### 📸 光谱图片识别模式")
+        st.markdown("上传光谱曲线图片（如论文中的谱图截图、仪器导出图片等），系统将自动提取曲线数据并参与匹配检索。")
+        
         img_file = st.file_uploader("上传光谱曲线图片 (jpg/png)", type=["jpg", "png", "jpeg"])
         if img_file is not None:
             st.image(img_file, use_column_width=True)
+            
             if st.button("🚀 开始提取图片曲线"):
-                x_vals, y_vals = process_image(img_file)
-                if x_vals is not None:
-                    # 提取的图片数据通常 X 轴是像素，这里仅作测试用
-                    st.session_state.sample_df = pd.DataFrame({"wavenumbers": x_vals, "intensities": y_vals})
-                    st.session_state.sample_type = "FTIR"  # 图片默认按FTIR处理
-                    st.session_state.sample_name = "Extracted from Image"
-                    st.success("✅ 图片曲线提取成功！")
-                else:
-                    st.error("提取失败，请确保背景为白色、曲线为深色。")
+                # 保存临时文件供 OpenCV 读取
+                temp_path = "temp_spectrum_upload.jpg"
+                with open(temp_path, "wb") as f:
+                    f.write(img_file.getbuffer())
+                
+                with st.spinner("🤖 正在提取曲线数据，请稍候..."):
+                    x_vals, y_vals, msg = process_image_from_file(temp_path)
+                    
+                    if x_vals is not None:
+                        n_points = len(x_vals)
+                        st.session_state.sample_df = pd.DataFrame({"wavenumbers": x_vals, "intensities": y_vals})
+                        st.session_state.sample_type = "FTIR"  # 图片默认按FTIR处理
+                        st.session_state.sample_name = f"图片提取({img_file.name})"
+                        st.success(f"✅ {msg}（共 {n_points} 个点）")
+                        st.info("💡 提示：图片数据已自动加载，右侧将自动进行匹配检索。如需校准坐标范围，请手动调整。")
+                        
+                        # 清理临时文件
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                    else:
+                        st.error(f"❌ {msg}")
+                        st.warning("💡 建议：确保图片中曲线清晰、背景为白色、坐标轴可见")
 
 with col2:
     st.header("📊 检索与匹配结果")
@@ -243,7 +278,7 @@ with col2:
                 st.success(f"🏆 找到匹配度最高的 {len(top_5)} 条数据：")
                 
                 # === XRD 专属：动态展示论文来源 ===
-                if s_type == "XRD":
+                if st.session_state.sample_type == "XRD":
                     st.divider()
                     st.subheader("📄 关联论文来源")
                     for i, match in enumerate(top_5):
@@ -256,7 +291,7 @@ with col2:
                 df_top5 = pd.DataFrame(top_5)
                 
                 # 根据类型设置显示中文表头
-                if s_type == "XRD":
+                if st.session_state.sample_type == "XRD":
                     display_names = {"name": "标准谱图文件名", "source_tag": "来源论文"}
                 else:
                     display_names = {"name": "标准谱图名称", "source_tag": "来源"}
