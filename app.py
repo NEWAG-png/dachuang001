@@ -134,47 +134,75 @@ def process_image_from_file(temp_path):
         return None, None, f"数据转换失败: {msg2}"
     return final_w, final_i, f"{msg1}->{msg2}"
 def calculate_similarity(df1, db_spec_dict):
-    """终版匹配算法：使用近似连接(merge_asof)彻底无视浮点数微小误差"""
+    """改进版匹配算法：使用插值对齐不同波数网格的谱图，解决FTIR匹配全0问题"""
     try:
-        #1.预处理数据，转为Pandas并强制清洗
-        df1_clean = df1.copy()
-        df2_clean = pd.DataFrame(db_spec_dict)
-        df1_clean['wavenumbers'] = pd.to_numeric(df1_clean['wavenumbers'], errors='coerce')
-        df2_clean['wavenumbers'] = pd.to_numeric(df2_clean['wavenumbers'], errors='coerce')
-        df1_clean['intensities'] = pd.to_numeric(df1_clean['intensities'], errors='coerce')
-        df2_clean['intensities'] = pd.to_numeric(df2_clean['intensities'], errors='coerce')
-        #2.按波数排序
-        df1_sorted = df1_clean.sort_values('wavenumbers')
-        df2_sorted = df2_clean.sort_values('wavenumbers')
-        #3.在±0.1的极小误差范围内进行模糊对齐
-        merged = pd.merge_asof(
-            df1_sorted, 
-            df2_sorted, 
-            on='wavenumbers', 
-            direction='nearest',
-            tolerance=0.1
-        )
-        #4.剔除空数据，提取对齐后的两组Y轴数据
-        aligned = merged.dropna(subset=['intensities_y'])
-        if len(aligned) < 50: return 0.0
-        s1 = aligned['intensities_x'].values
-        s2 = aligned['intensities_y'].values
-        #5.全局归一化到0-1区间
-        min_val = min(np.min(s1), np.min(s2))
-        max_val = max(np.max(s1), np.max(s2))
-        if max_val - min_val == 0: return 0.0
-        s1_norm = (s1 - min_val) / (max_val - min_val)
-        s2_norm = (s2 - min_val) / (max_val - min_val)
-        #6.减去均值，计算余弦相似度
+        # 1. 提取上传样品的数据（numpy数组，速度快）
+        s1_wavs = np.array(df1['wavenumbers'].values, dtype=np.float64)
+        s1_ints = np.array(df1['intensities'].values, dtype=np.float64)
+
+        # 2. 提取数据库谱图的数据
+        db_wavs = np.array(db_spec_dict['wavenumbers'], dtype=np.float64)
+        db_ints = np.array(db_spec_dict['intensities'], dtype=np.float64)
+
+        # 3. 清理 NaN/Inf 无效数据
+        valid1 = np.isfinite(s1_wavs) & np.isfinite(s1_ints)
+        valid2 = np.isfinite(db_wavs) & np.isfinite(db_ints)
+        s1_wavs = s1_wavs[valid1]
+        s1_ints = s1_ints[valid1]
+        db_wavs = db_wavs[valid2]
+        db_ints = db_ints[valid2]
+
+        if len(s1_wavs) < 10 or len(db_wavs) < 10:
+            return 0.0
+
+        # 4. 确保波数递增（np.interp要求x递增）
+        if s1_wavs[-1] < s1_wavs[0]:
+            s1_wavs = s1_wavs[::-1]
+            s1_ints = s1_ints[::-1]
+        if db_wavs[-1] < db_wavs[0]:
+            db_wavs = db_wavs[::-1]
+            db_ints = db_ints[::-1]
+
+        # 5. 取两条谱图的重叠波数范围
+        wav_min = max(np.min(s1_wavs), np.min(db_wavs))
+        wav_max = min(np.max(s1_wavs), np.max(db_wavs))
+
+        if wav_max - wav_min < 1:
+            return 0.0
+
+        # 6. 创建公共波数网格（取两者中点数较多的那个，保证分辨率）
+        n_points = max(len(s1_wavs), len(db_wavs))
+        common_wavs = np.linspace(wav_min, wav_max, n_points)
+
+        # 7. 用线性插值将两条谱图映射到公共网格
+        s1_interp = np.interp(common_wavs, s1_wavs, s1_ints)
+        db_interp = np.interp(common_wavs, db_wavs, db_ints)
+
+        # 8. 全局归一化到0-1区间
+        min_val = min(np.min(s1_interp), np.min(db_interp))
+        max_val = max(np.max(s1_interp), np.max(db_interp))
+        if max_val - min_val == 0:
+            return 0.0
+
+        s1_norm = (s1_interp - min_val) / (max_val - min_val)
+        db_norm = (db_interp - min_val) / (max_val - min_val)
+
+        # 9. 去均值，计算余弦相似度
         s1_centered = s1_norm - np.mean(s1_norm)
-        s2_centered = s2_norm - np.mean(s2_norm)
-        norm_product = np.linalg.norm(s1_centered) * np.linalg.norm(s2_centered)
-        if norm_product == 0: return 0.0
-        cos_sim = np.dot(s1_centered, s2_centered) / norm_product
+        db_centered = db_norm - np.mean(db_norm)
+
+        norm_product = np.linalg.norm(s1_centered) * np.linalg.norm(db_centered)
+        if norm_product == 0:
+            return 0.0
+
+        cos_sim = np.dot(s1_centered, db_centered) / norm_product
         percentage = max(0, (cos_sim + 1) / 2 * 100)
         return round(percentage, 2)
+
     except Exception as e:
+        print(f"[DEBUG] 匹配计算异常: {e}")
         return 0.0
+
 #3. Streamlit主界面逻辑
 st.title("🔬 文物粘接材料谱图老化匹配系统")
 col1, col2 = st.columns([1, 2])
