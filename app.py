@@ -204,6 +204,19 @@ with col1:
                             )
                     else:
                         st.warning('⚠️ XRD老化情况.xlsx 文件未找到，请确保文件与app.py在同一目录下')
+                #FTIR类型时显示Excel文献下载链接
+                if s_type == "FTIR":
+                    excel_path = 'pdf期刊.xlsx'
+                    if os.path.exists(excel_path):
+                        with open(excel_path, 'rb') as f:
+                            st.download_button(
+                                label='📊 查看FTIR文献资料',
+                                data=f,
+                                file_name='pdf期刊.xlsx',
+                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                            )
+                    else:
+                        st.warning('⚠️ pdf期刊.xlsx 文件未找到，请确保文件与app.py在同一目录下')
             else:
                 st.error("❌ 无法识别 CSV 表头。请确保包含波数/能量和强度列。")
     with tab2:
