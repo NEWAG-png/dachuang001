@@ -56,7 +56,7 @@ def parse_csv(uploaded_file):
         first_row_lower = [s.lower() for s in first_row_str]
         
         # 判断第一行是否包含已知的表头关键词
-        header_keywords = ['wavenumber', 'cm-1', 'cm^-1', '1/cm', '波数', 'kev', 'energy', 'channel', 'ch', '能量']
+        header_keywords = ['wavenumber', 'cm-1', 'cm^-1', '1/cm', '波数', 'kev', 'energy', 'channel', 'ch', '能量', 'm/z']
         first_row_is_header = any(any(kw in s for kw in header_keywords) for s in first_row_lower)
         
         if first_row_is_header:
@@ -75,6 +75,10 @@ def parse_csv(uploaded_file):
         #2.如果有表头，按表头关键词匹配
         if headers is not None:
             for i, h in enumerate(headers):
+                # 【新增】优先检测 TIC 类型（m/z 是 TIC/质谱特有标识）
+                if 'm/z' in h:
+                    x_col, y_col, s_type = i, i+1, "TIC"
+                    break
                 if any(word in h for word in ['wavenumber', 'cm-1', 'cm^-1', '1/cm', '波数']):
                     if 'raman' in " ".join(headers):
                         x_col, y_col, s_type = i, i+1, "Raman"
@@ -86,6 +90,7 @@ def parse_csv(uploaded_file):
                     break
         
         #3.没有匹配到表头（或无表头），按数据值范围自动判断是XRD还是FTIR
+        # 【注意】TIC数据若无表头，此处可能误判为FTIR/XRD，建议TIC文件保留表头（含m/z）
         if x_col is None and df.shape[1] >= 2:
             try:
                 col0 = pd.to_numeric(df[0])
@@ -227,6 +232,27 @@ with col1:
                         st.warning("💡 建议：确保图片中曲线清晰、背景为白色、坐标轴可见")
 with col2:
     st.header("📊 检索与匹配结果")
+    # 【新增】数据库浏览功能 - 可查看TIC等所有类型数据
+    with st.expander("🔍 浏览数据库内容"):
+        db_type = st.selectbox("选择谱图类型", ["全部", "FTIR", "XRD", "XRF", "Raman", "TIC"])
+        if db_type == "全部":
+            db_spectra_browse = load_database_spectra(None)
+        else:
+            db_spectra_browse = load_database_spectra(db_type)
+        if db_spectra_browse:
+            browse_data = []
+            for spec in db_spectra_browse:
+                browse_data.append({
+                    "谱图名称": spec['name'],
+                    "来源论文": spec.get('source_tag', '未知'),
+                    "数据点数": len(spec['wavenumbers']) if spec['wavenumbers'] else 0
+                })
+            if browse_data:
+                st.dataframe(pd.DataFrame(browse_data), use_container_width=True, hide_index=True)
+            else:
+                st.info("数据库中暂无数据")
+        else:
+            st.info("数据库为空，请先运行 smart_import.py 导入数据")
     if st.session_state.sample_df is not None:
         #只加载和当前样品相同类型的数据库
         db_spectra = load_database_spectra(st.session_state.sample_type)

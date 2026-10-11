@@ -3,12 +3,14 @@ import sqlite3
 import os
 import json
 import pandas as pd  #处理无表头数据
+import re  # 智能判断CSV是否有表头
 #1.设置路径
 FTIR_FOLDER = 'infraart_FTIR_csv'
 XRF_FOLDER = 'infraart_XRF_csv'
 RAMAN_FOLDER = 'infraart_Raman_CSV'
 XRD_FOLDER = 'XRD_csv'
 FTIR_REF_FOLDER = 'FTIR_with_references'
+TIC_FOLDER = 'TIC'
 DB_FILE = 'spectrum_db.sqlite'
 def init_db():
     """初始化连接数据库，确保表结构正确"""
@@ -40,6 +42,21 @@ def _check_duplicate(cursor, spectrum_name, spectrum_type):
     )
     count = cursor.fetchone()[0]
     return count > 0
+
+
+def _is_header(filepath):
+    """自动检测文件第一行是否为表头（如 X (m/z), Y (Intensity)）
+    如果第一行包含非数字字符（如字母、括号等），则判定为有表头
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            first_line = f.readline().strip()
+        # 排除空行，且如果第一行含有非数字、非逗号、非小数点、非负号的字符，就是表头
+        if first_line and re.match(r'^[\d\.,\-\s]+$', first_line) is None:
+            return True
+        return False
+    except Exception:
+        return False
 
 def import_folder(folder_path, target_type, conn):
     """智能读取并导入指定文件夹下的所有CSV文件（FTIR/XRF/Raman）"""
@@ -204,6 +221,72 @@ def import_ftir_ref_folder(folder_path, target_type, conn):
     conn.commit()
     print(f"📥 FTIR 带文献导入完成，共成功导入 {imported_count} 条数据，跳过 {skipped_count} 条重复。")
 
+def import_tic_folder(folder_path, target_type, conn):
+    """递归扫描文件夹，处理无表头的TIC数据（按论文名组织）
+    
+    文件夹结构要求：
+    TIC/
+    ├── 论文名1/
+    │   ├── sample01.csv
+    │   └── sample02.csv
+    ├── 论文名2/
+    │   └── sample03.csv
+    
+    CSV文件格式：支持有表头和无表头两种，自动识别（两列：保留时间/质荷比, 强度）
+    """
+    cursor = conn.cursor()
+    imported_count = 0
+    skipped_count = 0
+    if not os.path.exists(folder_path):
+        print(f"警告：文件夹 {folder_path} 不存在，跳过。")
+        return
+    print(f"\n正在扫描 TIC 论文文件夹: {folder_path}")
+    # 遍历根目录下的所有文件夹，即论文标题
+    for subfolder_name in os.listdir(folder_path):
+        subfolder_path = os.path.join(folder_path, subfolder_name)
+        if os.path.isdir(subfolder_path) and not subfolder_name.startswith('.'):
+            print(f"  📂 正在扫描论文: {subfolder_name}")
+            # 遍历论文文件夹里的文件
+            for filename in os.listdir(subfolder_path):
+                if filename.endswith('.csv'):
+                    file_path = os.path.join(subfolder_path, filename)
+                    try:
+                        # 【新增】重复检测：防止重复导入
+                        if _check_duplicate(cursor, filename, target_type):
+                            print(f"    ⏭️ 已存在(跳过): {filename}")
+                            skipped_count += 1
+                            continue
+                        
+                        # 智能判断第一行是不是表头（有的CSV带 "X (m/z), Y (Intensity)" 这种表头）
+                        if _is_header(file_path):
+                            # 有表头：跳过第一行（表头），用header=None保持整数列索引
+                            df = pd.read_csv(file_path, header=None, skiprows=1)
+                        else:
+                            # 无表头：直接按纯数字读取
+                            df = pd.read_csv(file_path, header=None)
+                        tic_values = []
+                        intensities = []
+                        # 检查数据是否有两列，防止读入空文件或坏文件
+                        if df.shape[1] >= 2:
+                            # 第一列当作TIC值（保留时间/质荷比），第二列当作强度
+                            tic_values = df[0].dropna().astype(float).tolist()
+                            intensities = df[1].dropna().astype(float).tolist()
+                        if len(tic_values) > 0:
+                            # 论文名存入source_tag（这样前端就能显示文献来源了）
+                            cursor.execute(
+                                'INSERT INTO spectra (spectrum_name, spectrum_type, source_tag, wavenumbers, intensities) VALUES (?, ?, ?, ?, ?)',
+                                (filename, target_type, subfolder_name, json.dumps(tic_values), json.dumps(intensities))
+                            )
+                            imported_count += 1
+                            print(f"    ✅ 成功导入: {filename} (论文: {subfolder_name})")
+                        else:
+                            print(f"    ❌ 失败 (无有效数据): {filename}")
+                    except Exception as e:
+                        print(f"    ❌ 处理文件 {filename} 时出错: {e}")
+    conn.commit()
+    print(f"📥 TIC 导入完成，共成功导入 {imported_count} 条数据，跳过 {skipped_count} 条重复。")
+
+
 if __name__ == "__main__":
     print("🚀 启动光谱数据智能导入系统...")
     #连接数据库
@@ -216,6 +299,8 @@ if __name__ == "__main__":
     import_xrd_folder(XRD_FOLDER, 'XRD', connection)
     # 【新增】处理带文献来源的FTIR数据
     import_ftir_ref_folder(FTIR_REF_FOLDER, 'FTIR', connection)
+    # 【新增】处理TIC数据（按论文文件夹组织）
+    import_tic_folder(TIC_FOLDER, 'TIC', connection)
     #验证导入结果
     cursor = connection.cursor()
     cursor.execute("SELECT spectrum_type, COUNT(*) FROM spectra GROUP BY spectrum_type")
